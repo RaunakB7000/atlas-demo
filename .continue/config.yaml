@@ -1,0 +1,31 @@
+name: Main Config
+version: 1.0.0
+schema: v1
+
+models:
+  - name: ASU Qwen3 Coder
+    provider: openai
+    model: qwen36-35b-a3b
+    apiKey: "sk-naNhXDsKJjGlrgeWAv2CrA"
+    apiBase: https://openai.rc.asu.edu/v1
+    roles:
+      - chat
+      - edit
+
+  - name: ASU Muse Glimmer
+    provider: openai
+    model: muse-glimmer-30b
+    apiKey: "sk-naNhXDsKJjGlrgeWAv2CrA"
+    apiBase: https://openai.rc.asu.edu/v1
+    roles:
+      - chat
+      - edit
+
+  - name: ASU Devstral
+    provider: openai
+    model: devstral2-123b
+    apiKey: "sk-naNhXDsKJjGlrgeWAv2CrA"
+    apiBase: https://openai.rc.asu.edu/v1
+    roles:
+      - chat
+      - edit
