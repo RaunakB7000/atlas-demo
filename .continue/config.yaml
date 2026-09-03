@@ -6,26 +6,29 @@ models:
   - name: ASU Qwen3 Coder
     provider: openai
     model: qwen36-35b-a3b
-    apiKey: "sk-naNhXDsKJjGlrgeWAv2CrA"
     apiBase: https://openai.rc.asu.edu/v1
+    apiKey: ${{ secrets.OPENAI_API_KEY }}
     roles:
       - chat
       - edit
+      - apply
 
   - name: ASU Muse Glimmer
     provider: openai
     model: muse-glimmer-30b
-    apiKey: "sk-naNhXDsKJjGlrgeWAv2CrA"
     apiBase: https://openai.rc.asu.edu/v1
+    apiKey: ${{ secrets.OPENAI_API_KEY }}
     roles:
       - chat
       - edit
+      - apply
 
   - name: ASU Devstral
     provider: openai
     model: devstral2-123b
-    apiKey: "sk-naNhXDsKJjGlrgeWAv2CrA"
     apiBase: https://openai.rc.asu.edu/v1
+    apiKey: ${{ secrets.OPENAI_API_KEY }}
     roles:
       - chat
       - edit
+      - apply
