@@ -1,13 +1,29 @@
-# backend/app/api/websockets.py
-from fastapi import WebSocket
-from ..services.call_processor import CallProcessor
-from ..simulator.call_streamer import stream_calls
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-processor = CallProcessor()
+from ..services.simulation_engine import simulation
 
-@router.websocket("/ws/incidents")
-async def websocket_incidents(websocket: WebSocket):
+router = APIRouter()
+
+
+@router.websocket("/ws/live")
+async def websocket_live(websocket: WebSocket):
     await websocket.accept()
-    for call in stream_calls():
-        incident = processor.process_call(call)
-        await websocket.send_json(incident.dict())
+    await simulation.subscribe(websocket)
+    try:
+        while True:
+            message = await websocket.receive_json()
+            action = message.get("action")
+            if action == "start":
+                await simulation.start(message.get("num_calls"), message.get("delay"))
+            elif action == "pause":
+                await simulation.pause()
+            elif action == "reset":
+                await simulation.reset()
+            elif action == "inject":
+                await simulation.inject_critical()
+            elif action == "approve":
+                await simulation.approve_incident(message.get("incident_id"))
+    except WebSocketDisconnect:
+        simulation.unsubscribe(websocket)
+    except Exception:
+        simulation.unsubscribe(websocket)

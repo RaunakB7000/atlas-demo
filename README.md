@@ -1,5 +1,12 @@
-Atlas — AI Emergency Operations Copilot
-Atlas ingests streams like:
+# Atlas — AI Emergency Operations Copilot
+
+Dispatch centers do not fail from a lack of information. They fail when too many reports arrive at once. Atlas uses ASU AIR to process emergency streams in parallel, turn unstructured 911 audio/text into structured incidents, collapse duplicate reports, and continuously recommend how limited units should move as the scene changes.
+
+This repo is a hackathon demo for the Tempe / Phoenix area. It uses **synthetic 911-style data only**. Do not point it at real private live calls unless you have explicit authorized access.
+
+## What it does
+
+Atlas ingests streams such as:
 
 - 911 call transcripts
 - caller location
@@ -9,281 +16,201 @@ Atlas ingests streams like:
 - traffic / road closures
 - weather
 - prior nearby incidents
-  Then it uses AIR to process, classify, prioritize, and continuously re-plan emergency response.
-  The important caveat: for a hackathon, you should use synthetic or public historical 911-style data, not real private live calls unless ASU explicitly gives you authorized access.
-  What Atlas would actually do
-  Imagine 200 calls arriving across Phoenix.
-  Instead of a dispatcher manually interpreting everything one by one, AIR processes them concurrently.
-  Example calls:
-  “There’s smoke coming from an apartment.”
 
-“My dad collapsed and isn’t responding.”
+Then it classifies, prioritizes, clusters, and re-plans.
 
+Example: 200 calls arrive across Phoenix. Instead of a dispatcher reading them one by one, Atlas processes them concurrently and produces a live incident map.
+
+```
+“There's smoke coming from an apartment.”
+“My dad collapsed and isn't responding.”
 “Three-car crash on Rural and Broadway.”
+“Someone is yelling outside but I don't see a weapon.”
+```
 
-“Someone is yelling outside but I don’t see a weapon.”
+becomes structured incidents such as:
 
-Atlas turns that unstructured audio/text into structured incidents:
-Incident #183
-Type: Medical
-Severity: Critical
-Location: 85281
-Signals:
+- **Incident #183**
+- Type: Medical
+- Severity: P1
+- Signals: unconscious person, possible cardiac arrest
+- Recommended response: nearest ALS ambulance
+- Human dispatcher still approves the assignment
 
-- unconscious person
-- possible cardiac arrest
-  Recommended response:
-- EMS
-- nearest ALS ambulance
-  Priority: P1
-  Then you put them on a live map.
-  Where AIR actually matters
-  This is where I think the idea gets good.
+## Where AIR matters
 
-1. Massive concurrent call processing
-   Suppose a major event happens and suddenly you have:
-   2,000 incoming calls.
-   AIR could process many transcripts/inferences in parallel.
-   Pipeline:
-   911 Audio Streams
-   ↓
-   Qwen ASR
-   speech → text
-   ↓
-   AIR LLM workers
-   ↓
-   Extract:
+1. **Concurrent call processing**  
+   Qwen ASR (when configured) plus AIR LLM workers extract emergency type, severity, address, injuries, hazards, and people count from many transcripts at once.
 
-- emergency type
-- severity
-- address/location
-- injuries
-- hazards
-- number of people
-  ↓
-  Structured incidents
-  AIR includes a dedicated Qwen ASR model plus large reasoning models, so that fits the platform capabilities directly.
-  Now your AIR justification isn't:
-  “We call an LLM.”
+2. **Duplicate detection**  
+   During a major event, 500 callers can be describing 127 unique emergencies. Atlas embeds each report and clusters by geographic proximity, time proximity, and semantic similarity.
 
-It's:
-“We process hundreds or thousands of emergency reports simultaneously.”
+3. **Severity as decision support**  
+   P1 immediate threat to life, P2 urgent, P3 moderate, P4 non-emergency. Atlas recommends. A dispatcher approves. It does not autonomously make final life-or-death dispatch decisions.
 
-2. Detect duplicate calls
-   This is a really interesting feature.
-   During a major emergency, many people call 911 about the same event.
-   Example:
-   Caller 1:
-   "There's a huge accident on Mill Ave."
+4. **Resource allocation**  
+   15 ambulances, 8 fire trucks, 20 police units, and a surge of active incidents. Atlas scores severity, travel time, required equipment, nearby units, and hospital capacity.
 
-Caller 2:
-"Three cars crashed by Mill and University."
+5. **Continuous re-optimization**  
+   Observe → analyze → plan → recommend → new information → re-plan. A new cardiac arrest, a highway closure, or a hospital hitting capacity triggers a fresh recommendation.
 
-Caller 3:
-"I just saw a car flip near ASU."
-Those may represent one incident, not three.
-AIR generates embeddings for the calls and clusters them using:
+6. **Demand prediction**  
+   Historical synthetic volume plus time-of-day patterns (Friday night on Mill Ave, evening commute on Rural / Broadway) recommend where to pre-position units.
 
-- geographic proximity
-- time proximity
-- semantic similarity
-  So:
-  500 calls
-
-          ↓
-
-AIR embeddings
-
+```
+911 / traffic / weather
         ↓
-
-Incident clustering
-
+   AIR ASR + agents
         ↓
+Call Understanding · Severity · Clustering
+Resource Allocation · Routing · Prediction
+        ↓
+  Optimization engine
+        ↓
+ Live map + recommended responders
+```
 
-127 unique emergencies
-That's a legitimate compute problem.
-AIR provides a local embedding model suited for embedding/RAG workflows. Spark Challenge Prep Workshop Deck.pdfPDF
-And this gives you a fantastic demo metric:
-“Atlas received 1,000 reports but determined they represented 243 unique incidents.”
+## Demo flow
 
-3. Severity classification
-   AIR examines every incident and determines:
-   P1 — Immediate threat to life
-   P2 — Urgent
-   P3 — Moderate
-   P4 — Non-emergency
-   But I would not let the AI autonomously make final life-or-death dispatch decisions.
-   Pitch it as:
-   Decision support for human dispatchers
-   Atlas recommends:
-   ⚠️ Possible cardiac arrest — escalate to P1.
+The safest judge path is **Guided demo** in the console. It walks through a deterministic
+scenario, recommendation evidence, human approval, a new P1 incident, live re-planning, the
+operations timeline, and the after-action report.
 
-Dispatcher approves.
-That is a much more responsible system design and will likely play better with the challenge's emphasis on ethical technology. 4. Resource allocation
-Now combine 911 intelligence with your original Atlas idea.
-You have:
-15 ambulances
-8 fire trucks
-20 police units
-and:
-47 active incidents
-AIR has to decide which resources are most appropriate.
-For example:
-Incident A
-Cardiac arrest
-1.2 miles
+Manual controls are also available:
 
-Incident B
-Minor collision
-0.4 miles
+1. Choose **ASU game night**, **Monsoon response**, or **Weekday commute**.
+2. Click **Start scenario**. The same scenario replays the same validated synthetic inputs each time.
+3. Open an incident and review the recommended unit, ETA, decision factors, policy, and alternatives.
+4. Click **Approve & dispatch** for the human-in-the-loop step.
+5. Click **Inject P1** to introduce a major collision and compare the previous plan with the re-route.
+6. Open **Timeline** for the decision log, then **Report** for the after-action summary and JSON export.
 
-Incident C
-Building fire
-3.1 miles
-Atlas considers:
+Synthetic scenarios use repeatable, locally validated analysis so a model or VPN interruption cannot
+derail the presentation. For non-scenario inputs, configured ASU AIR models remain the primary
+analysis path with local fallback.
 
-- severity
-- travel time
-- required equipment
-- nearby units
-- hospital capacity
-- expected future demand
-  and recommends assignments.
+## Stack
 
-5. Continuously re-optimize
-   This should be the hero feature.
-   Emergency situations aren't static.
-   At 8:03 PM:
-   Ambulance 12 → Incident A
+| Layer | Choice |
+| --- | --- |
+| Frontend | React + Vite + Leaflet |
+| Backend | Python / FastAPI, using the Python libraries in `backend/requirements.txt` |
+| Database | SQLite via SQLAlchemy |
+| Models | Local heuristics by default; ASU AIR when env keys are set |
 
-Then at 8:04:
-🚨 New cardiac arrest call arrives.
+## Project layout
 
-Atlas recomputes.
-Maybe Ambulance 12 should go to the new incident and Ambulance 7 covers the previous one.
-Or:
-Highway closed.
+```
+atlas-demo/
+├── backend/
+│   ├── app/
+│   │   ├── api/
+│   │   ├── services/
+│   │   ├── agents/
+│   │   ├── models/
+│   │   ├── database/
+│   │   ├── simulator/
+│   │   └── schemas/
+│   ├── main.py
+│   ├── requirements.txt
+│   └── .env
+├── frontend/
+└── README.md
+```
 
-Recompute routes.
-Or:
-Hospital A reaches capacity.
+## Run with Docker
 
-Redirect incoming ambulances.
-That's genuinely agentic.
-Observe
-↓
-Analyze
-↓
-Plan
-↓
-Recommend
-↓
-New information
-↓
-Re-plan
-↺ 6. Predict where calls are likely to happen
-This is where it becomes even more computationally intensive.
-Feed it historical data:
-millions of 911 calls
+The fastest path, and the one to hand to anyone else. Requires only Docker Desktop.
 
-- time
-- location
-- weather
-- events
-- traffic
-  AIR / an ML model can identify spatiotemporal patterns.
-  For example:
-  Friday, 11 PM
-  Mill Avenue
+```bash
+docker compose up --build
+```
 
-Atlas predicts:
-Elevated incident probability
-Then it could recommend pre-positioning ambulances nearby before emergencies happen.
-Instead of:
-“Where should we send this ambulance?”
+Then open **[http://localhost:8080](http://localhost:8080)**. The frontend is built by Vite and
+served by nginx, which proxies `/api` and `/ws` to the FastAPI container. SQLite lives in a named
+volume so incidents survive a restart.
 
-you move toward:
-“Where should ambulances be positioned in the next hour?”
+No API keys are required — Atlas falls back to local classifiers and free map tiles. To use the
+real models, copy `.env.example` to `.env`, fill in the AIR and MapTiler values, and rebuild.
+`WEB_PORT` and `BACKEND_PORT` in that same file move the published ports if 8080 or 8000 are
+already taken.
 
-That's a much bigger product.
-Full Atlas architecture
-ATLAS
+```bash
+docker compose down     # stop
+docker compose down -v  # stop and wipe the database volume
+```
 
-                 Emergency streams
-                        │
-       ┌────────────────┼────────────────┐
-       ↓                ↓                ↓
+See [QUICKSTART.md](QUICKSTART.md) for the demo script.
 
-911 calls Traffic Weather
-│
-↓
-AIR ASR
-│
-↓
-Transcript Processing
-│
-↓
-┌─────────────────────────────────────────┐
-│ AIR AGENT LAYER │
-│ │
-│ Call Understanding Agent │
-│ Severity Agent │
-│ Duplicate/Clustering Agent │
-│ Resource Allocation Agent │
-│ Routing Agent │
-│ Prediction Agent │
-└───────────────────┬─────────────────────┘
-↓
-Optimization Engine
-↓
-LIVE MAP
+## Install for local development
 
-      🔴 Cardiac arrest
-      🔴 Building fire
-      🟠 Accident
-      🟡 Disturbance
+You need Python 3.11+ and Node 18+.
 
-                     +
-         Recommended responders
+### 1. Backend
 
-The demo I'd build
-Don't actually build all of that tomorrow.
-Create a simulator generating maybe:
-500 synthetic 911 calls
-spread around Tempe/Phoenix.
-Then hit:
-START EMERGENCY SIMULATION
-Calls begin streaming in.
-Incoming reports: 327
-AIR starts processing.
-Transcribed: 327
-Unique incidents: 91
-Critical: 12
-High priority: 29
-Medium: 50
-The map starts populating.
-Then click:
-Incident #37
-🔴 Possible cardiac arrest
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-6 calls clustered into this incident.
+Fill in `backend/.env`. Variable names are already there; add values only where you have them.
 
-Confidence: 94%
+| Variable | Purpose |
+| --- | --- |
+| `APP_NAME` | Service name |
+| `APP_ENV` | `development` or `production` |
+| `APP_HOST` | Bind host |
+| `APP_PORT` | Bind port |
+| `CORS_ORIGINS` | Comma-separated frontend origins |
+| `DATABASE_URL` | SQLite path, default `sqlite:///./atlas.db` |
+| `AIR_API_KEY` | ASU AIR key |
+| `AIR_API_BASE_URL` | ASU AIR base URL |
+| `AIR_LLM_MODEL` | Reasoning model name |
+| `AIR_EMBEDDING_MODEL` | Embedding model name |
+| `AIR_ASR_MODEL` | Qwen ASR model name |
+| `SIMULATION_CALL_COUNT` | Calls per simulation |
+| `SIMULATION_BATCH_SIZE` | Calls processed together |
+| `SIMULATION_DELAY_SECONDS` | Pause between batches |
+| `SIMULATION_ON_SCENE_TICKS` | Ticks a dispatched unit remains on scene before release |
 
-Recommended response: Ambulance 4
+AIR keys can stay empty. Atlas then uses local classifiers, hashed embeddings, and the synthetic transcripts already in the simulator.
 
-Then trigger:
-🚨 NEW INCIDENT
-Major collision reported.
+Start the API from `backend/`:
 
-Atlas says:
-Current resource allocation is no longer optimal.
+```bash
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
 
-Recalculating...
-Map updates.
-That's your wow moment.
-And your 20-second pitch
-“During emergencies, dispatch centers don't suffer from a lack of information—they suffer from too much information arriving too quickly. Atlas uses ASU AIR to process thousands of emergency reports in parallel, transcribe and understand calls, detect duplicate reports, identify critical incidents, and continuously recommend how limited emergency resources should be allocated as conditions change.”
+API docs: [http://localhost:8000/docs](http://localhost:8000/docs)
 
-Then:
-“Instead of helping dispatchers handle one call, Atlas helps them understand the entire emergency landscape.”
+### 2. Frontend
+
+```bash
+cd frontend
+npm install
+```
+
+Fill in `frontend/.env` if the defaults are wrong:
+
+| Variable | Purpose |
+| --- | --- |
+| `VITE_API_URL` | Backend origin, default `http://localhost:8000` |
+| `VITE_WS_URL` | WebSocket origin, default `ws://localhost:8000` |
+
+```bash
+npm run dev
+```
+
+Open [http://localhost:5173](http://localhost:5173).
+
+- `/` — landing page for judges (pitch, problem, six capabilities)
+- `/how-it-works` — AIR architecture and stack
+- `/console` — live operations demo
+
+## 20-second pitch
+
+During emergencies, dispatch centers do not suffer from a lack of information — they suffer from too much information arriving too quickly. Atlas uses ASU AIR to process thousands of emergency reports in parallel, transcribe and understand calls, detect duplicate reports, identify critical incidents, and continuously recommend how limited emergency resources should be allocated as conditions change.
+
+Instead of helping dispatchers handle one call, Atlas helps them understand the entire emergency landscape.

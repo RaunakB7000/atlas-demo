@@ -1,194 +1,268 @@
 import random
-import time
 from datetime import datetime, timedelta
-from typing import Generator, Dict, Any
-from faker import Faker
-from ..models.incident import Location
+from typing import Any, AsyncGenerator
 
-fake = Faker()
+from ..schemas.incident import Location
 
-# Tempe/Phoenix area coordinates (bounding box)
+
+SCENARIOS: dict[str, dict[str, Any]] = {
+    "asu_game_night": {
+        "id": "asu_game_night",
+        "label": "ASU game night",
+        "description": "Post-event crowd surge across Mill Avenue and the ASU campus edge.",
+        "focus": "Crowd safety, medical calls, and traffic incidents",
+        "default_calls": 72,
+        "seed": 7301,
+        "weights": {"Medical": 0.34, "Fire": 0.12, "Accident": 0.26, "Disturbance": 0.28},
+    },
+    "monsoon_response": {
+        "id": "monsoon_response",
+        "label": "Monsoon response",
+        "description": "A fast-moving storm creates collisions, outages, and access constraints.",
+        "focus": "Road access, rescue, and hospital load",
+        "default_calls": 64,
+        "seed": 8128,
+        "weights": {"Medical": 0.25, "Fire": 0.20, "Accident": 0.45, "Disturbance": 0.10},
+    },
+    "weekday_commute": {
+        "id": "weekday_commute",
+        "label": "Weekday commute",
+        "description": "Morning congestion along Rural Road, Broadway, and the Loop 202.",
+        "focus": "Collision clustering and ambulance coverage",
+        "default_calls": 56,
+        "seed": 4510,
+        "weights": {"Medical": 0.30, "Fire": 0.10, "Accident": 0.50, "Disturbance": 0.10},
+    },
+}
+
+DEFAULT_SCENARIO = "asu_game_night"
+
+
+def seed_simulation(seed: int) -> None:
+    """Seed all synthetic inputs used by a scenario run."""
+    random.seed(seed)
+
+
+def public_scenarios() -> list[dict[str, Any]]:
+    return [
+        {key: value for key, value in scenario.items() if key != "seed" and key != "weights"}
+        for scenario in SCENARIOS.values()
+    ]
+
 TEMPE_LAT_RANGE = (33.35, 33.45)
 TEMPE_LNG_RANGE = (-111.98, -111.88)
 
-# Incident types and their likelihood
 INCIDENT_TYPES = {
     "Medical": 0.4,
     "Fire": 0.2,
     "Accident": 0.3,
-    "Disturbance": 0.1
+    "Disturbance": 0.1,
 }
 
-# Common phrases for each incident type
 INCIDENT_PHRASES = {
     "Medical": [
         "chest pain",
-        "unconscious",
+        "unconscious and not responding",
         "not breathing",
-        "cardiac arrest",
+        "possible cardiac arrest",
         "seizure",
         "diabetic emergency",
         "allergic reaction",
-        "stroke symptoms"
+        "stroke symptoms",
+        "collapsed and unresponsive",
     ],
     "Fire": [
-        "smoke coming from",
+        "smoke coming from an apartment",
         "building on fire",
         "apartment fire",
         "car fire",
         "explosion",
         "gas leak",
-        "electrical fire"
+        "electrical fire",
     ],
     "Accident": [
-        "car crash",
+        "three-car crash on Rural and Broadway",
         "multi-vehicle collision",
         "hit and run",
         "pedestrian struck",
         "motorcycle accident",
-        "bicycle accident",
-        "rollover accident"
+        "huge accident on Mill Ave",
+        "car flip near ASU",
     ],
     "Disturbance": [
-        "loud noise",
+        "someone is yelling outside but I don't see a weapon",
         "suspicious person",
         "fight in progress",
         "shots fired",
         "domestic dispute",
         "burglary",
-        "robbery"
-    ]
+        "robbery",
+    ],
 }
 
-# Common street names in Tempe/Phoenix
 TEMPE_STREETS = [
-    "Rural Rd", "University Dr", "Apache Blvd", "Mill Ave",
-    "Broadway Rd", "Southern Ave", "McClintock Dr", "Priest Dr"
+    "Rural Rd",
+    "University Dr",
+    "Apache Blvd",
+    "Mill Ave",
+    "Broadway Rd",
+    "Southern Ave",
+    "McClintock Dr",
+    "Priest Dr",
 ]
 
-def generate_call(call_id: int) -> Dict[str, Any]:
-    """Generate a single synthetic 911 call with realistic details."""
-    # Random incident type (weighted)
-    incident_type = random.choices(
-        list(INCIDENT_TYPES.keys()),
-        weights=list(INCIDENT_TYPES.values()),
-        k=1
-    )[0]
+CLUSTER_SEEDS = [
+    {
+        "incident_type": "Accident",
+        "lat": 33.4248,
+        "lng": -111.9402,
+        "phrase": "huge accident on Mill Ave",
+        "street": "Mill Ave",
+        "variants": [
+            "There's a huge accident on Mill Ave.",
+            "Three cars crashed by Mill and University.",
+            "I just saw a car flip near ASU.",
+        ],
+    },
+    {
+        "incident_type": "Medical",
+        "lat": 33.4140,
+        "lng": -111.9265,
+        "phrase": "possible cardiac arrest",
+        "street": "Rural Rd",
+        "variants": [
+            "My dad collapsed and isn't responding.",
+            "Unconscious person, possible cardiac arrest.",
+            "He's not breathing on Rural Road.",
+        ],
+    },
+    {
+        "incident_type": "Fire",
+        "lat": 33.4075,
+        "lng": -111.9330,
+        "phrase": "smoke coming from an apartment",
+        "street": "Broadway Rd",
+        "variants": [
+            "There's smoke coming from an apartment.",
+            "Apartment fire, people still inside.",
+            "I see flames on the second floor.",
+        ],
+    },
+]
 
-    # Random location in Tempe/Phoenix
-    location = Location(
-        lat=round(random.uniform(*TEMPE_LAT_RANGE), 6),
-        lng=round(random.uniform(*TEMPE_LNG_RANGE), 6)
-    )
 
-    # Generate realistic transcript
-    phrase = random.choice(INCIDENT_PHRASES[incident_type])
-    street = random.choice(TEMPE_STREETS)
-    address = f"{random.randint(100, 9999)} {street}, Tempe, AZ"
+def generate_call(
+    call_id: int,
+    force_cluster: bool = True,
+    scenario: str = DEFAULT_SCENARIO,
+) -> dict[str, Any]:
+    scenario_config = SCENARIOS.get(scenario, SCENARIOS[DEFAULT_SCENARIO])
+    if force_cluster and call_id % 7 == 0:
+        seed = CLUSTER_SEEDS[call_id % len(CLUSTER_SEEDS)]
+        jitter = 0.0015
+        location = Location(
+            lat=round(seed["lat"] + random.uniform(-jitter, jitter), 6),
+            lng=round(seed["lng"] + random.uniform(-jitter, jitter), 6),
+        )
+        transcript = random.choice(seed["variants"])
+        address = f"{random.randint(100, 9999)} {seed['street']}, Tempe, AZ"
+        transcript = f"{transcript} At {address}."
+        incident_type = seed["incident_type"]
+    else:
+        weights = scenario_config["weights"]
+        incident_type = random.choices(
+            list(weights.keys()),
+            weights=list(weights.values()),
+            k=1,
+        )[0]
+        location = Location(
+            lat=round(random.uniform(*TEMPE_LAT_RANGE), 6),
+            lng=round(random.uniform(*TEMPE_LNG_RANGE), 6),
+        )
+        phrase = random.choice(INCIDENT_PHRASES[incident_type])
+        street = random.choice(TEMPE_STREETS)
+        address = f"{random.randint(100, 9999)} {street}, Tempe, AZ"
+        if incident_type == "Medical":
+            transcript = f"Caller reports a patient with {phrase} at {address}. Caller is staying on scene."
+        elif incident_type == "Fire":
+            transcript = f"Multiple callers report {phrase} at {address}. Occupancy is not yet confirmed."
+        elif incident_type == "Accident":
+            transcript = f"Traffic collision reported: {phrase} at {address}. Lanes may be blocked."
+        else:
+            transcript = f"Caller reports {phrase} near {address}. No additional hazards confirmed."
 
-    # Add more context based on incident type
-    if incident_type == "Medical":
-        transcript = f"Caller reports {phrase}. {fake.sentence()} At {address}."
-    elif incident_type == "Fire":
-        transcript = f"{fake.sentence()} There's {phrase} at {address}."
-    elif incident_type == "Accident":
-        transcript = f"{phrase} reported at {address}. {fake.sentence()}"
-    else:  # Disturbance
-        transcript = f"{fake.sentence()} {phrase} near {address}."
-
-    # Random timestamp (last 2 hours)
-    timestamp = datetime.now() - timedelta(
-        minutes=random.randint(0, 120)
-    )
-
+    timestamp = datetime.now() - timedelta(seconds=random.randint(0, 90))
     return {
         "id": call_id,
         "transcript": transcript,
         "timestamp": timestamp.isoformat(),
         "location": {"lat": location.lat, "lng": location.lng},
-        "incident_type": incident_type,  # Ground truth for demo
-        "raw_audio_url": f"https://example.com/audio/{call_id}.wav"  # Mock audio
+        "incident_type": incident_type,
+        "raw_audio_url": f"https://example.com/audio/{call_id}.wav",
+        "deterministic": True,
     }
 
-def stream_calls(
-    num_calls: int = 500,
-    delay: float = 0.1,
+
+async def stream_calls(
+    num_calls: int = 200,
+    delay: float = 0.4,
     batch_size: int = 5,
-    incident_distribution: Dict[str, float] = None
-) -> Generator[Dict[str, Any], None, None]:
-    """
-    Stream synthetic 911 calls with configurable parameters.
+    start_id: int = 1,
+    scenario: str = DEFAULT_SCENARIO,
+    seed: int | None = None,
+) -> AsyncGenerator[list[dict[str, Any]], None]:
+    if seed is not None:
+        seed_simulation(seed)
+    current = start_id
+    remaining = num_calls
+    while remaining > 0:
+        size = min(batch_size, remaining)
+        batch = [generate_call(current + offset, scenario=scenario) for offset in range(size)]
+        current += size
+        remaining -= size
+        yield batch
 
-    Args:
-        num_calls: Total calls to generate (default: 500)
-        delay: Seconds between batches (default: 0.1)
-        batch_size: Calls per batch (default: 5)
-        incident_distribution: Custom incident type weights (optional)
-
-    Yields:
-        Dict: Synthetic call data with all fields
-    """
-    # Use custom distribution if provided
-    global INCIDENT_TYPES
-    if incident_distribution:
-        INCIDENT_TYPES = incident_distribution
-
-    for i in range(0, num_calls, batch_size):
-        batch = []
-        for j in range(batch_size):
-            if i + j >= num_calls:
-                break
-            batch.append(generate_call(i + j))
-
-        for call in batch:
-            yield call
-
-        time.sleep(delay)  # Simulate real-time streaming
 
 def generate_historical_data(
     num_days: int = 7,
-    calls_per_day: int = 100
-) -> list[Dict[str, Any]]:
-    """
-    Generate historical call data for training/prediction models.
-
-    Args:
-        num_days: Number of days to generate data for
-        calls_per_day: Average calls per day
-
-    Returns:
-        List of historical call records
-    """
+    calls_per_day: int = 80,
+    scenario: str = DEFAULT_SCENARIO,
+) -> list[dict[str, Any]]:
     historical_data = []
     base_date = datetime.now() - timedelta(days=num_days)
-
+    call_id = 10000
     for day in range(num_days):
         day_date = base_date + timedelta(days=day)
-        calls_today = random.randint(calls_per_day - 20, calls_per_day + 20)
-
-        for call_id in range(calls_today):
-            # Adjust incident distribution based on time of day
-            hour = random.randint(0, 23)
-            if 22 <= hour <= 4:  # Nighttime - more disturbances
-                temp_dist = {"Medical": 0.3, "Fire": 0.1, "Accident": 0.2, "Disturbance": 0.4}
-            else:  # Daytime - more accidents
-                temp_dist = {"Medical": 0.4, "Fire": 0.2, "Accident": 0.3, "Disturbance": 0.1}
-
-            call = generate_call((day * calls_per_day) + call_id)
-            call["timestamp"] = (day_date + timedelta(
-                hours=random.randint(0, 23),
-                minutes=random.randint(0, 59)
-            )).isoformat()
-
-            # Add weather/traffic context (mock)
+        calls_today = random.randint(calls_per_day - 15, calls_per_day + 15)
+        for _ in range(calls_today):
+            call = generate_call(call_id, force_cluster=False, scenario=scenario)
+            call["timestamp"] = (
+                day_date
+                + timedelta(hours=random.randint(0, 23), minutes=random.randint(0, 59))
+            ).isoformat()
             if random.random() > 0.7:
-                call["context"] = random.choice([
-                    "Heavy rain reported in area",
-                    "Major traffic accident nearby",
-                    "ASU football game just ended",
-                    "Temperature over 110°F"
-                ])
-
+                call["context"] = random.choice(
+                    [
+                        "Heavy rain reported in area",
+                        "Major traffic accident nearby",
+                        "ASU football game just ended",
+                        "Temperature over 110°F",
+                    ]
+                )
             historical_data.append(call)
-
+            call_id += 1
     return historical_data
+
+
+def generate_critical_inject(call_id: int, scenario: str = DEFAULT_SCENARIO) -> dict[str, Any]:
+    return {
+        "id": call_id,
+        "transcript": "Major multi-vehicle collision on the 202 with trapped occupants and a possible cardiac arrest in one vehicle. Rural and Broadway.",
+        "timestamp": datetime.now().isoformat(),
+        "location": {"lat": 33.4068, "lng": -111.9262},
+        "incident_type": "Accident",
+        "raw_audio_url": f"https://example.com/audio/{call_id}.wav",
+        "injected": True,
+        "deterministic": True,
+        "context": {"scenario": scenario, "trigger": "guided_replan"},
+    }

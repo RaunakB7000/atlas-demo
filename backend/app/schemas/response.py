@@ -1,39 +1,37 @@
-from pydantic import BaseModel
-from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
-class ResourceType(str, Enum):
-    AMBULANCE = "Ambulance"
-    FIRE_TRUCK = "Fire Truck"
-    POLICE = "Police"
-    AIR_AMBULANCE = "Air Ambulance"
+from pydantic import BaseModel, Field
 
-class ResourceStatus(str, Enum):
-    AVAILABLE = "Available"
-    EN_ROUTE = "En Route"
-    ON_SCENE = "On Scene"
-    UNAVAILABLE = "Unavailable"
 
-class ResourceBase(BaseModel):
-    type: ResourceType
-    location: dict  # {lat: float, lng: float}
-    speed_mph: int
+class ApiMessage(BaseModel):
+    message: str
+    data: Optional[dict[str, Any]] = None
 
-class ResourceCreate(ResourceBase):
-    station: str
 
-class ResourceResponse(ResourceBase):
-    id: str
-    status: ResourceStatus
-    current_incident_id: Optional[int] = None
-    station: str
-    eta: Optional[float] = None  # Minutes
+class SimulationStatus(BaseModel):
+    state: str
+    incoming_reports: int = 0
+    transcribed: int = 0
+    unique_incidents: int = 0
+    critical: int = 0
+    high_priority: int = 0
+    medium: int = 0
+    low: int = 0
+    target_calls: int = 0
+    last_event: Optional[str] = None
 
-class ResourceUpdate(BaseModel):
-    status: Optional[ResourceStatus] = None
-    location: Optional[dict] = None
-    current_incident_id: Optional[int] = None
 
-class ResourceAssignment(BaseModel):
-    resource_id: str
-    incident_id: int
+class PredictionResponse(BaseModel):
+    id: int
+    label: str
+    lat: float
+    lng: float
+    hour: int
+    probability: float
+    recommendation: Optional[str] = None
+
+
+class ReallocationEvent(BaseModel):
+    message: str
+    incident_id: str
+    changes: list[dict[str, Any]] = Field(default_factory=list)

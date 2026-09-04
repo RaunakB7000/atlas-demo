@@ -1,231 +1,131 @@
-from typing import List, Dict, Optional
-from ..schemas.incident import IncidentResponse
-from ..schemas.resource import ResourceResponse, ResourceType, ResourceStatus
-from geopy.distance import geodesic
-from datetime import datetime, timedelta
-import heapq
+from __future__ import annotations
+
+from ..agents.allocation_agent import AllocationAgent
+from ..agents.routing_agent import RoutingAgent
+from ..schemas.incident import IncidentResponse, SeverityLevel, get_severity_value
+from ..schemas.resource import ResourceResponse, ResourceStatus, ResourceType
+
+def severity_priority(severity: SeverityLevel | str) -> int:
+    """Get priority for sorting - lower number = higher priority.
+    
+    P1 = 1 (highest priority), P2 = 2, P3 = 3, P4 = 4 (lowest priority)
+    """
+    return {"P1": 1, "P2": 2, "P3": 3, "P4": 4}.get(get_severity_value(severity), 4)
+
 
 class ResourceManager:
-    def __init__(self, initial_resources: List[ResourceResponse]):
-        self.resources = {r.id: r for r in initial_resources}
-        self.resource_types = {
-            ResourceType.AMBULANCE: [],
-            ResourceType.FIRE_TRUCK: [],
-            ResourceType.POLICE: [],
-            ResourceType.AIR_AMBULANCE: []
+    def __init__(self, initial_resources: list[ResourceResponse] | None = None) -> None:
+        self.resources: dict[str, ResourceResponse] = {
+            item.id: item for item in (initial_resources or [])
         }
-        self._initialize_resource_pools()
+        self.allocator = AllocationAgent()
+        self.router = RoutingAgent()
 
-    def _initialize_resource_pools(self):
-        """Initialize resource pools by type."""
-        for resource in self.resources.values():
-            self.resource_types[resource.type].append(resource.id)
+    def load(self, resources: list[ResourceResponse]) -> None:
+        self.resources = {item.id: item for item in resources}
 
-    def allocate_resources(self, incidents: List[IncidentResponse]) -> List[ResourceResponse]:
-        """
-        Allocate resources to incidents using a priority-based algorithm.
-
-        Args:
-            incidents: List of incidents needing resources
-
-        Returns:
-            List of updated resources
-        """
-        # Sort incidents by priority (P1 first, then by time)
+    def allocate_resources(
+        self,
+        incidents: list[IncidentResponse],
+        hospitals: list[dict] | None = None,
+        traffic: dict | None = None,
+    ) -> list[ResourceResponse]:
         sorted_incidents = sorted(
             incidents,
-            key=lambda x: (self._severity_priority(x.severity), x.timestamp)
+            key=lambda item: (self._severity_priority(item.severity), item.timestamp),
         )
-
         for incident in sorted_incidents:
-            if incident.assigned_resource:
-                continue  # Already assigned
-
-            required_types = self._get_required_resources(incident)
-            assigned = False
-
-            for resource_type in required_types:
-                available = self._get_available_resources(resource_type)
-
-                if not available:
-                    continue
-
-                # Find closest available resource
-                closest = self._find_closest_resource(incident, available)
-
-                if closest:
-                    self._assign_resource(closest, incident)
-                    assigned = True
-                    break
-
-            if not assigned and incident.severity == SeverityLevel.P1:
-                # For P1 incidents, try any available resource
-                for resource_type in ResourceType:
-                    available = self._get_available_resources(resource_type)
-                    if available:
-                        closest = self._find_closest_resource(incident, available)
-                        if closest:
-                            self._assign_resource(closest, incident)
-                            break
-
+            if incident.assigned_resource or incident.status == "Resolved":
+                continue
+            recommendation = self.allocator.recommend(
+                incident,
+                list(self.resources.values()),
+                hospitals,
+                traffic,
+            )
+            resource_id = recommendation["primary_resource_id"]
+            if not resource_id:
+                continue
+            self.apply_recommendation(incident, recommendation)
         return list(self.resources.values())
 
-    def _severity_priority(self, severity: str) -> int:
-        """Convert severity to numerical priority (lower is higher priority)."""
-        priorities = {"P1": 1, "P2": 2, "P3": 3, "P4": 4}
-        return priorities.get(severity, 4)
+    def recommend_only(
+        self,
+        incident: IncidentResponse,
+        hospitals: list[dict] | None = None,
+        traffic: dict | None = None,
+    ) -> dict:
+        return self.allocator.recommend(incident, list(self.resources.values()), hospitals, traffic)
 
-    def _get_required_resources(self, incident: IncidentResponse) -> List[ResourceType]:
-        """Determine what resource types are needed for an incident."""
-        required = []
+    def apply_recommendation(self, incident: IncidentResponse, recommendation: dict) -> None:
+        """Attach one explainable proposal without changing resource state."""
+        extra = recommendation.get("assignments", [])[1:]
+        incident.context = {
+            **incident.context,
+            "recommended_resource_id": recommendation.get("primary_resource_id"),
+            "recommended_support_units": [row["resource_id"] for row in extra],
+            "hospital": recommendation.get("hospital"),
+            "recommendation_explanation": recommendation.get("explanation", {}),
+            "recommendation_alternatives": recommendation.get("alternatives", []),
+        }
+        incident.context.pop("support_units", None)
+        incident.recommended_response = recommendation["recommended_response"]
+        if incident.status in {"Pending", "Clustered", "Awaiting Resource"}:
+            incident.status = "Recommended"
 
-        # All incidents need at least one resource
-        if incident.incident_type == IncidentType.MEDICAL:
-            required.append(ResourceType.AMBULANCE)
-            if "cardiac" in incident.transcript.lower() or "unconscious" in incident.transcript.lower():
-                # Critical medical needs fastest response
-                required.insert(0, ResourceType.AIR_AMBULANCE)
-
-        elif incident.incident_type == IncidentType.FIRE:
-            required.append(ResourceType.FIRE_TRUCK)
-            required.append(ResourceType.AMBULANCE)  # Always send medical with fire
-
-        elif incident.incident_type == IncidentType.ACCIDENT:
-            required.append(ResourceType.POLICE)
-            if "multi-vehicle" in incident.transcript.lower() or "injuries" in incident.transcript.lower():
-                required.append(ResourceType.AMBULANCE)
-                required.append(ResourceType.FIRE_TRUCK)
-
-        elif incident.incident_type == IncidentType.DISTURBANCE:
-            required.append(ResourceType.POLICE)
-
-        return required
-
-    def _get_available_resources(self, resource_type: ResourceType) -> List[ResourceResponse]:
-        """Get all available resources of a specific type."""
-        return [
-            self.resources[rid]
-            for rid in self.resource_types[resource_type]
-            if self.resources[rid].status == ResourceStatus.AVAILABLE
-        ]
-
-    def _find_closest_resource(self, incident: IncidentResponse, resources: List[ResourceResponse]) -> Optional[ResourceResponse]:
-        """Find the closest available resource to an incident."""
-        if not resources:
+    def dispatch_resource(
+        self,
+        resource_id: str,
+        incident: IncidentResponse,
+        traffic: dict | None = None,
+    ) -> ResourceResponse | None:
+        resource = self.resources.get(resource_id)
+        if not resource or resource.status != ResourceStatus.AVAILABLE:
             return None
+        self._assign_resource(resource, incident, traffic)
+        return resource
 
-        incident_loc = (incident.location.lat, incident.location.lng)
-        resource_distances = []
-
-        for resource in resources:
-            resource_loc = (resource.location.lat, resource.location.lng)
-            distance = geodesic(incident_loc, resource_loc).km
-            resource_distances.append((distance, resource))
-
-        # Return the closest resource
-        return min(resource_distances, key=lambda x: x[0])[1]
-
-    def _assign_resource(self, resource: ResourceResponse, incident: IncidentResponse):
-        """Assign a resource to an incident and update status."""
-        resource.status = ResourceStatus.EN_ROUTE
-        resource.current_incident_id = incident.id
-
-        # Calculate ETA (simplified)
-        incident_loc = (incident.location.lat, incident.location.lng)
-        resource_loc = (resource.location.lat, resource.location.lng)
-        distance_km = geodesic(incident_loc, resource_loc).km
-        resource.eta = distance_km / (resource.speed_mph * 1.60934) * 60  # Convert to minutes
-
-        # Update incident
-        incident.assigned_resource = resource.id
-
-    def update_resource_status(self):
-        """Update resource statuses (e.g., arrived on scene)."""
+    def update_resource_status(self) -> None:
         for resource in self.resources.values():
             if resource.status == ResourceStatus.EN_ROUTE and resource.eta is not None:
-                # Simulate movement (reduce ETA)
-                resource.eta = max(0, resource.eta - 0.5)  # Reduce by 30 seconds
-
+                resource.eta = max(0, round(resource.eta - 0.4, 1))
                 if resource.eta <= 0:
                     resource.status = ResourceStatus.ON_SCENE
 
-    def release_resource(self, resource_id: str):
-        """Release a resource back to available pool."""
-        if resource_id in self.resources:
-            resource = self.resources[resource_id]
-            resource.status = ResourceStatus.AVAILABLE
-            resource.current_incident_id = None
-            resource.eta = None
+    def release_resource(self, resource_id: str) -> None:
+        resource = self.resources.get(resource_id)
+        if not resource:
+            return
+        resource.status = ResourceStatus.AVAILABLE
+        resource.current_incident_id = None
+        resource.eta = None
 
-            # Return to station (simplified - just reset to original station location)
-            # In a real implementation, you'd track the station location
-            if "Station" in resource.station:
-                resource.location = {
-                    "lat": 33.4186 if "Fire" in resource.station else 33.4255,
-                    "lng": -111.9332 if "Fire" in resource.station else -111.9400
-                }
-
-    def get_resource_utilization(self) -> Dict:
-        """Get current resource utilization statistics."""
-        total = {rt: len(ids) for rt, ids in self.resource_types.items()}
-        available = {
-            rt: len([rid for rid in ids if self.resources[rid].status == ResourceStatus.AVAILABLE])
-            for rt, ids in self.resource_types.items()
-        }
-        en_route = {
-            rt: len([rid for rid in ids if self.resources[rid].status == ResourceStatus.EN_ROUTE])
-            for rt, ids in self.resource_types.items()
-        }
-        on_scene = {
-            rt: len([rid for rid in ids if self.resources[rid].status == ResourceStatus.ON_SCENE])
-            for rt, ids in self.resource_types.items()
-        }
-
+    def get_resource_utilization(self) -> dict:
+        total = len(self.resources)
+        available = sum(1 for item in self.resources.values() if item.status == ResourceStatus.AVAILABLE)
         return {
             "total": total,
             "available": available,
-            "en_route": en_route,
-            "on_scene": on_scene,
-            "utilization": {
-                rt: 1 - (available[rt] / total[rt]) if total[rt] > 0 else 0
-                for rt in ResourceType
-            }
+            "utilization": 1 - (available / total) if total else 0,
         }
 
-    def reallocate_resources(self, new_incident: IncidentResponse):
-        """
-        Reallocate resources when a new high-priority incident arrives.
-        May reassign resources from lower-priority incidents.
-        """
-        if new_incident.severity != SeverityLevel.P1:
-            return  # Only reallocate for P1 incidents
+    def _assign_resource(
+        self,
+        resource: ResourceResponse,
+        incident: IncidentResponse,
+        traffic: dict | None = None,
+    ) -> None:
+        resource.status = ResourceStatus.EN_ROUTE
+        resource.current_incident_id = incident.id
+        resource.eta = self.router.eta_minutes(
+            resource.location,
+            incident.location,
+            resource.speed_mph,
+            traffic,
+        )
+        incident.assigned_resource = resource.id
+        incident.status = "Dispatched"
+        incident.recommended_response = resource.id.replace("_", " ")
 
-        # Find all currently assigned resources
-        assigned_resources = [
-            r for r in self.resources.values()
-            if r.status == ResourceStatus.EN_ROUTE and r.current_incident_id
-        ]
-
-        # Get the incident this would be reassigned from
-        original_incident_id = assigned_resources[0].current_incident_id
-
-        # Find the original incident
-        # (In a real implementation, you'd have access to all incidents)
-        original_incident = None  # Would be retrieved from your incident store
-
-        # Only reassign if the new incident is higher priority
-        if original_incident and self._severity_priority(new_incident.severity) < self._severity_priority(original_incident.severity):
-            # Reassign the closest resource
-            closest = self._find_closest_resource(new_incident, assigned_resources)
-            if closest:
-                # Release from original incident
-                if original_incident:
-                    original_incident.assigned_resource = None
-                    original_incident.status = "Pending"
-
-                # Assign to new incident
-                self._assign_resource(closest, new_incident)
-
-                return True
-
-        return False
+    def _severity_priority(self, severity: SeverityLevel | str) -> int:
+        return severity_priority(severity)

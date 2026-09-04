@@ -1,0 +1,39 @@
+services:
+  backend:
+    build: ./backend
+    container_name: atlas-backend
+    environment:
+      APP_NAME: Atlas
+      APP_ENV: production
+      DATABASE_URL: sqlite:////data/atlas.db
+      CORS_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+      AIR_API_KEY: ${AIR_API_KEY:-}
+      AIR_API_BASE_URL: ${AIR_API_BASE_URL:-}
+      AIR_LLM_MODEL: ${AIR_LLM_MODEL:-}
+      AIR_EMBEDDING_MODEL: ${AIR_EMBEDDING_MODEL:-}
+      AIR_ASR_MODEL: ${AIR_ASR_MODEL:-}
+      SIMULATION_CALL_COUNT: ${SIMULATION_CALL_COUNT:-200}
+      SIMULATION_BATCH_SIZE: ${SIMULATION_BATCH_SIZE:-5}
+      SIMULATION_DELAY_SECONDS: ${SIMULATION_DELAY_SECONDS:-0.4}
+      SIMULATION_ON_SCENE_TICKS: ${SIMULATION_ON_SCENE_TICKS:-15}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - atlas-data:/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_MAPTILER_KEY: ${VITE_MAPTILER_KEY:-}
+    container_name: atlas-frontend
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  atlas-data:

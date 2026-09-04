@@ -1,217 +1,183 @@
-from typing import List, Dict, Optional
+from __future__ import annotations
+
+import json
 from datetime import datetime
-from ..schemas.incident import IncidentResponse, IncidentType, SeverityLevel
-from ..schemas.resource import ResourceResponse
-from ..agents.severity_classifier import SeverityClassifier
-from ..agents.duplicate_detector import DuplicateDetector
-from ..agents.incident_classifier import IncidentClassifier
-from geopy.distance import geodesic
+from typing import Any
+
+from ..agents.call_understanding import CallUnderstandingAgent
+from ..agents.clustering_agent import ClusteringAgent
+from ..agents.severity_agent import SeverityAgent
+from ..agents.air_client import air_client
+from ..schemas.incident import IncidentResponse, IncidentType, Location, SeverityLevel, get_severity_value
+
+
+def severity_priority(severity: SeverityLevel | str) -> int:
+    """Get priority for sorting - lower number = higher priority.
+    
+    P1 = 1 (highest priority), P2 = 2, P3 = 3, P4 = 4 (lowest priority)
+    """
+    return {"P1": 1, "P2": 2, "P3": 3, "P4": 4}.get(get_severity_value(severity), 4)
+
 
 class CallProcessor:
-    def __init__(self):
-        self.severity_classifier = SeverityClassifier()
-        self.incident_classifier = IncidentClassifier()
-        self.duplicate_detector = DuplicateDetector()
+    def __init__(self) -> None:
+        self.understanding = CallUnderstandingAgent()
+        self.severity = SeverityAgent()
+        self.clustering = ClusteringAgent()
 
-    def process_call(self, call_data: Dict) -> IncidentResponse:
-        """
-        Process a single 911 call into a structured incident.
-
-        Args:
-            call_data: Raw call data from simulator
-
-        Returns:
-            Structured IncidentResponse
-        """
-        # Extract basic info
+    def process_call(self, call_data: dict[str, Any]) -> IncidentResponse:
+        deterministic = bool(call_data.get("deterministic"))
         transcript = call_data["transcript"]
+        if not deterministic:
+            transcript = air_client.transcribe(
+                call_data.get("raw_audio_url", ""),
+                transcript,
+            )
+        extracted = self.understanding.analyze(transcript, deterministic=deterministic)
+        incident_type = extracted["incident_type"]
+        if isinstance(incident_type, str):
+            incident_type = IncidentType(incident_type)
+        model_incident_type = incident_type
+        if deterministic and call_data.get("incident_type"):
+            incident_type = IncidentType(str(call_data["incident_type"]).title())
+        severity_info = self.severity.recommend(
+            transcript,
+            incident_type,
+            deterministic=deterministic,
+        )
         location = call_data["location"]
-        timestamp = call_data.get("timestamp", datetime.now().isoformat())
+        if not isinstance(location, Location):
+            location = Location(**location)
 
-        # Classify incident type and severity
-        incident_type = self.incident_classifier.classify(transcript)
-        severity = self.severity_classifier.classify(transcript, incident_type)
-
-        # Create base incident
         incident = IncidentResponse(
-            id=call_data["id"],
+            id=f"inc_{call_data['id']}",
             transcript=transcript,
             incident_type=incident_type,
-            severity=severity,
+            severity=severity_info["severity"],
             location=location,
-            timestamp=timestamp,
-            confidence=0.9,  # Default confidence
-            clustered_calls=[call_data["id"]],
-            status="Pending"
+            timestamp=call_data.get("timestamp", datetime.now().isoformat()),
+            confidence=0.91 if extracted.get("source") == "air" else 0.84,
+            clustered_calls=[int(call_data["id"])],
+            status="Pending",
+            context={
+                "signals": extracted.get("signals", []),
+                "injuries": extracted.get("injuries", []),
+                "hazards": extracted.get("hazards", []),
+                "people_count": extracted.get("people_count", 1),
+                "address_hint": extracted.get("address_hint", ""),
+                "severity_rationale": severity_info["rationale"],
+                "escalate": severity_info["escalate"],
+                "source": extracted.get("source"),
+                "analysis_mode": "validated scenario replay" if deterministic else "live analysis",
+                "model_incident_type": model_incident_type.value,
+            },
+            call_count=1,
         )
-
-        # Add context based on incident type
-        incident.context = self._generate_context(incident)
-
+        incident.recommended_response = self._default_recommendation(incident)
         return incident
 
-    def process_batch(self, calls: List[Dict]) -> List[IncidentResponse]:
-        """
-        Process a batch of calls with duplicate detection.
+    def merge_into(self, existing: IncidentResponse, incoming: IncidentResponse) -> IncidentResponse:
+        previous_status = existing.status
+        previous_recommendation = existing.recommended_response
+        was_active = bool(existing.assigned_resource) or previous_status in {"Dispatched", "En Route", "On Scene"}
+        existing.clustered_calls = list(set(existing.clustered_calls + incoming.clustered_calls))
+        existing.call_count = len(existing.clustered_calls)
+        # Cluster severity escalates to the most serious severity among its reports
+        # P1 (4) > P2 (3) > P3 (2) > P4 (1)
+        if severity_priority(incoming.severity) < severity_priority(existing.severity):
+            existing.severity = incoming.severity
+            existing.transcript = incoming.transcript
+        existing.location = self._centroid([existing.location, incoming.location])
+        existing.confidence = min(0.98, round(0.78 + 0.04 * existing.call_count, 2))
+        existing.status = previous_status if was_active else "Clustered"
+        existing.context = {
+            **existing.context,
+            "original_incidents": existing.call_count,
+            "time_span": self._time_span([existing, incoming]),
+        }
+        existing.recommended_response = previous_recommendation if was_active else self._default_recommendation(existing)
+        return existing
 
-        Args:
-            calls: List of raw call data
-
-        Returns:
-            List of processed incidents (with duplicates merged)
-        """
-        # First pass: Process all calls individually
+    def process_batch(self, calls: list[dict[str, Any]]) -> list[IncidentResponse]:
         incidents = [self.process_call(call) for call in calls]
-
-        # Second pass: Detect and merge duplicates
-        clusters = self.duplicate_detector.detect(incidents)
-
-        # Create final incidents from clusters
-        final_incidents = []
-        for cluster_id, cluster_incidents in clusters.items():
-            if len(cluster_incidents) == 1:
-                final_incidents.append(cluster_incidents[0])
+        clusters = self.clustering.detect(incidents)
+        merged = []
+        for cluster_id, group in clusters.items():
+            if len(group) == 1:
+                merged.append(group[0])
             else:
-                final_incidents.append(self._merge_cluster(cluster_id, cluster_incidents))
-
-        return final_incidents
-
-    def _merge_cluster(self, cluster_id: int, incidents: List[IncidentResponse]) -> IncidentResponse:
-        """
-        Merge multiple incidents into a single cluster.
-
-        Args:
-            cluster_id: Unique cluster identifier
-            incidents: List of incidents to merge
-
-        Returns:
-            Merged incident with combined data
-        """
-        # Use the most severe incident as base
-        base_incident = max(incidents, key=lambda x: self._severity_rank(x.severity))
-
-        # Combine all call IDs
-        all_call_ids = []
-        for incident in incidents:
-            all_call_ids.extend(incident.clustered_calls)
-
-        # Calculate average location (centroid)
-        centroid = self._calculate_centroid([i.location for i in incidents])
-
-        # Create merged incident
-        merged = IncidentResponse(
-            id=f"cluster_{cluster_id}",
-            transcript=self._create_cluster_transcript(incidents),
-            incident_type=base_incident.incident_type,
-            severity=base_incident.severity,
-            location=centroid,
-            timestamp=min(i.timestamp for i in incidents),  # First call timestamp
-            confidence=self._calculate_cluster_confidence(incidents),
-            clustered_calls=list(set(all_call_ids)),  # Remove duplicates
-            status="Clustered",
-            context={
-                "original_incidents": len(incidents),
-                "call_ids": all_call_ids,
-                "time_span": self._calculate_time_span(incidents)
-            }
-        )
-
+                # Base is the most severe incident in the cluster (lowest priority number)
+                base = min(group, key=lambda item: severity_priority(item.severity))
+                for extra in group:
+                    if extra.id != base.id:
+                        base = self.merge_into(base, extra)
+                base.id = f"cluster_{cluster_id}"
+                merged.append(base)
         return merged
 
-    def _severity_rank(self, severity: SeverityLevel) -> int:
-        """Convert severity to numerical rank for comparison."""
-        ranks = {"P1": 4, "P2": 3, "P3": 2, "P4": 1}
-        return ranks.get(severity, 0)
+    def _default_recommendation(self, incident: IncidentResponse) -> str:
+        mapping = {
+            IncidentType.MEDICAL: "Nearest ALS ambulance",
+            IncidentType.FIRE: "Fire engine + ambulance",
+            IncidentType.ACCIDENT: "Police and rescue",
+            IncidentType.DISTURBANCE: "Nearest police unit",
+            IncidentType.OTHER: "Nearest available unit",
+        }
+        return mapping[incident.incident_type]
 
-    def _calculate_centroid(self, locations: List[Dict]) -> Dict:
-        """Calculate geographic centroid of multiple locations."""
-        if not locations:
-            return {"lat": 0, "lng": 0}
+    def _severity_rank(self, severity: SeverityLevel | str) -> int:
+        # For clustering, higher number = more severe (for comparison)
+        return {"P1": 4, "P2": 3, "P3": 2, "P4": 1}.get(get_severity_value(severity), 0)
 
-        avg_lat = sum(loc["lat"] for loc in locations) / len(locations)
-        avg_lng = sum(loc["lng"] for loc in locations) / len(locations)
-
-        return {"lat": round(avg_lat, 6), "lng": round(avg_lng, 6)}
-
-    def _create_cluster_transcript(self, incidents: List[IncidentResponse]) -> str:
-        """Create a combined transcript for clustered incidents."""
-        base = incidents[0].transcript
-        others = [i.transcript for i in incidents[1:3]]  # Show first 2 additional calls
-
-        summary = f"Multiple reports: {base}"
-        if others:
-            summary += f" | Similar reports: {'; '.join(others)}"
-
-        if len(incidents) > 3:
-            summary += f" | +{len(incidents)-3} more similar reports"
-
-        return summary
-
-    def _calculate_cluster_confidence(self, incidents: List[IncidentResponse]) -> float:
-        """Calculate confidence score for the cluster."""
-        # Base confidence on severity agreement
-        severities = [i.severity for i in incidents]
-        if len(set(severities)) == 1:
-            confidence = 0.95
-        else:
-            confidence = 0.7
-
-        # Adjust for geographic proximity
-        locations = [i.location for i in incidents]
-        max_dist = max(
-            geodesic(
-                (loc1["lat"], loc1["lng"]),
-                (loc2["lat"], loc2["lng"])
-            ).km
-            for loc1 in locations
-            for loc2 in locations
+    def _centroid(self, locations: list[Location]) -> Location:
+        return Location(
+            lat=round(sum(item.lat for item in locations) / len(locations), 6),
+            lng=round(sum(item.lng for item in locations) / len(locations), 6),
         )
 
-        if max_dist < 0.5:  # Within 500m
-            confidence *= 1.1
-        elif max_dist > 2.0:  # More than 2km apart
-            confidence *= 0.8
+    def _time_span(self, incidents: list[IncidentResponse]) -> str:
+        stamps = [datetime.fromisoformat(item.timestamp.replace("Z", "+00:00")).replace(tzinfo=None) for item in incidents]
+        delta = max(stamps) - min(stamps)
+        seconds = delta.total_seconds()
+        if seconds < 60:
+            return f"{int(seconds)} seconds"
+        return f"{int(seconds / 60)} minutes"
 
-        return min(round(confidence, 2), 0.99)
 
-    def _calculate_time_span(self, incidents: List[IncidentResponse]) -> str:
-        """Calculate time span of all calls in the cluster."""
-        timestamps = [datetime.fromisoformat(i.timestamp) for i in incidents]
-        time_span = max(timestamps) - min(timestamps)
+def incident_to_record(incident: IncidentResponse) -> dict[str, Any]:
+    return {
+        "id": incident.id,
+        "transcript": incident.transcript,
+        "incident_type": incident.incident_type.value,
+        "severity": get_severity_value(incident.severity),
+        "lat": incident.location.lat,
+        "lng": incident.location.lng,
+        "timestamp": datetime.fromisoformat(incident.timestamp.replace("Z", "+00:00")).replace(tzinfo=None),
+        "confidence": incident.confidence,
+        "clustered_calls": json.dumps(incident.clustered_calls),
+        "assigned_resource": incident.assigned_resource,
+        "status": incident.status,
+        "context": json.dumps(incident.context),
+        "recommended_response": incident.recommended_response,
+        "dispatcher_approved": incident.dispatcher_approved,
+        "call_count": incident.call_count,
+    }
 
-        if time_span.total_seconds() < 60:
-            return f"{int(time_span.total_seconds())} seconds"
-        elif time_span.total_seconds() < 3600:
-            return f"{int(time_span.total_seconds()/60)} minutes"
-        else:
-            return f"{int(time_span.total_seconds()/3600)} hours"
 
-    def _generate_context(self, incident: IncidentResponse) -> Dict:
-        """Generate additional context based on incident details."""
-        context = {
-            "possible_conditions": [],
-            "recommended_resources": []
-        }
-
-        # Medical incidents
-        if incident.incident_type == IncidentType.MEDICAL:
-            if "chest pain" in incident.transcript.lower():
-                context["possible_conditions"].append("Possible cardiac event")
-                context["recommended_resources"].append("ALS Ambulance")
-            if "unconscious" in incident.transcript.lower():
-                context["possible_conditions"].append("Possible unconsciousness")
-                context["recommended_resources"].append("ALS Ambulance")
-
-        # Fire incidents
-        elif incident.incident_type == IncidentType.FIRE:
-            if "apartment" in incident.transcript.lower():
-                context["possible_conditions"].append("Structure fire")
-                context["recommended_resources"].extend(["Fire Truck", "Ambulance"])
-
-        # Accident incidents
-        elif incident.incident_type == IncidentType.ACCIDENT:
-            if "multi-vehicle" in incident.transcript.lower():
-                context["possible_conditions"].append("Multi-vehicle collision")
-                context["recommended_resources"].extend(["Fire Truck", "Ambulance", "Police"])
-
-        return context
+def record_to_incident(record) -> IncidentResponse:
+    return IncidentResponse(
+        id=record.id,
+        transcript=record.transcript,
+        incident_type=IncidentType(record.incident_type),
+        severity=SeverityLevel(record.severity),
+        location=Location(lat=record.lat, lng=record.lng),
+        timestamp=record.timestamp.isoformat(),
+        confidence=record.confidence,
+        clustered_calls=json.loads(record.clustered_calls or "[]"),
+        assigned_resource=record.assigned_resource,
+        status=record.status,
+        context=json.loads(record.context or "{}"),
+        recommended_response=record.recommended_response,
+        dispatcher_approved=record.dispatcher_approved,
+        call_count=record.call_count,
+    )

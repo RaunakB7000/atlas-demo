@@ -1,310 +1,137 @@
-from typing import List, Dict, Optional
-from datetime import datetime, timedelta
 from collections import defaultdict
-from ..schemas.incident import IncidentResponse, SeverityLevel
-from ..schemas.resource import ResourceResponse, ResourceType
+from datetime import datetime
+from typing import Any, Optional
+
+from ..schemas.incident import IncidentResponse, SeverityLevel, get_severity_value
+from ..schemas.resource import ResourceResponse, ResourceStatus, ResourceType
 
 class StatsService:
     @staticmethod
     def calculate_stats(
-        incidents: List[IncidentResponse],
-        resources: List[ResourceResponse],
-        historical_data: Optional[List[Dict]] = None
-    ) -> Dict:
-        """
-        Calculate comprehensive statistics for the dashboard.
-
-        Args:
-            incidents: Current active incidents
-            resources: Current resource states
-            historical_data: Optional historical data for trends
-
-        Returns:
-            Dictionary of statistics
-        """
-        # Incident statistics
+        incidents: list[IncidentResponse],
+        resources: list[ResourceResponse],
+        incoming_reports: int = 0,
+        historical_data: Optional[list[dict]] = None,
+    ) -> dict[str, Any]:
         incident_stats = StatsService._calculate_incident_stats(incidents)
-
-        # Resource statistics
         resource_stats = StatsService._calculate_resource_stats(resources)
-
-        # Response time statistics
         response_stats = StatsService._calculate_response_stats(incidents, resources)
-
-        # Trend statistics (if historical data provided)
-        trend_stats = {}
-        if historical_data:
-            trend_stats = StatsService._calculate_trends(historical_data)
-
-        return {
+        trend_stats = StatsService._calculate_trends(historical_data or [])
+        stats = {
             **incident_stats,
             **resource_stats,
             **response_stats,
             **trend_stats,
-            "timestamp": datetime.now().isoformat()
+            "incoming_reports": incoming_reports,
+            "unique_incidents": len(incidents),
+            "timestamp": datetime.now().isoformat(),
         }
+        stats["report"] = StatsService.generate_report(stats)
+        stats["warnings"] = stats["report"]["warnings"]
+        stats["recommendations"] = stats["report"]["recommendations"]
+        return stats
 
     @staticmethod
-    def _calculate_incident_stats(incidents: List[IncidentResponse]) -> Dict:
-        """Calculate incident-related statistics."""
-        if not incidents:
-            return {
-                "total_incidents": 0,
-                "by_severity": {s.value: 0 for s in SeverityLevel},
-                "by_type": {},
-                "pending_incidents": 0,
-                "clustered_incidents": 0,
-                "average_confidence": 0
-            }
-
-        # Count by severity
-        by_severity = defaultdict(int)
-        by_type = defaultdict(int)
-        total_confidence = 0
-        clustered_count = 0
-
+    def _calculate_incident_stats(incidents: list[IncidentResponse]) -> dict[str, Any]:
+        by_severity = {level.value: 0 for level in SeverityLevel}
+        by_type: dict[str, int] = defaultdict(int)
+        clustered = 0
+        confidence_total = 0.0
         for incident in incidents:
-            by_severity[incident.severity] += 1
-            by_type[incident.incident_type.value] += 1
-            total_confidence += incident.confidence
-
-            if len(incident.clustered_calls) > 1:
-                clustered_count += 1
-
-        # Calculate averages
-        avg_confidence = total_confidence / len(incidents)
-        pending = sum(1 for i in incidents if i.status == "Pending")
-
+            severity_str = get_severity_value(incident.severity)
+            by_severity[severity_str] += 1
+            by_type[str(incident.incident_type.value if hasattr(incident.incident_type, "value") else incident.incident_type)] += 1
+            confidence_total += incident.confidence
+            if incident.call_count > 1 or len(incident.clustered_calls) > 1:
+                clustered += 1
         return {
             "total_incidents": len(incidents),
-            "by_severity": dict(by_severity),
+            "by_severity": by_severity,
             "by_type": dict(by_type),
-            "pending_incidents": pending,
-            "clustered_incidents": clustered_count,
-            "average_confidence": round(avg_confidence, 2),
+            "pending_incidents": sum(1 for item in incidents if item.status == "Pending"),
+            "clustered_incidents": clustered,
+            "average_confidence": round(confidence_total / len(incidents), 2) if incidents else 0,
             "critical_incidents": by_severity.get("P1", 0),
-            "high_priority_incidents": by_severity.get("P1", 0) + by_severity.get("P2", 0)
+            "high_priority_incidents": by_severity.get("P1", 0) + by_severity.get("P2", 0),
         }
 
     @staticmethod
-    def _calculate_resource_stats(resources: List[ResourceResponse]) -> Dict:
-        """Calculate resource-related statistics."""
-        if not resources:
-            return {
-                "total_resources": 0,
-                "by_type": {rt.value: 0 for rt in ResourceType},
-                "by_status": {},
-                "utilization_rate": 0,
-                "average_eta": 0
-            }
-
-        by_type = defaultdict(int)
-        by_status = defaultdict(int)
-        total_etas = []
-        available_count = 0
-
+    def _calculate_resource_stats(resources: list[ResourceResponse]) -> dict[str, Any]:
+        by_type = {item.value: 0 for item in ResourceType}
+        by_status = {item.value: 0 for item in ResourceStatus}
+        etas = []
         for resource in resources:
             by_type[resource.type.value] += 1
             by_status[resource.status.value] += 1
-
-            if resource.status.value == "Available":
-                available_count += 1
-
             if resource.eta is not None:
-                total_etas.append(resource.eta)
-
-        utilization_rate = 1 - (available_count / len(resources)) if resources else 0
-        avg_eta = sum(total_etas) / len(total_etas) if total_etas else 0
-
+                etas.append(resource.eta)
+        available = by_status.get("Available", 0)
         return {
             "total_resources": len(resources),
-            "by_type": dict(by_type),
-            "by_status": dict(by_status),
-            "utilization_rate": round(utilization_rate, 2),
-            "available_resources": available_count,
+            "by_resource_type": by_type,
+            "by_status": by_status,
+            "utilization_rate": round(1 - (available / len(resources)), 2) if resources else 0,
+            "available_resources": available,
             "en_route_resources": by_status.get("En Route", 0),
             "on_scene_resources": by_status.get("On Scene", 0),
-            "average_eta": round(avg_eta, 1) if avg_eta > 0 else 0
+            "average_eta": round(sum(etas) / len(etas), 1) if etas else 0,
         }
 
     @staticmethod
     def _calculate_response_stats(
-        incidents: List[IncidentResponse],
-        resources: List[ResourceResponse]
-    ) -> Dict:
-        """Calculate response time statistics."""
-        if not incidents or not resources:
-            return {
-                "average_response_time": 0,
-                "response_times_by_severity": {},
-                "unassigned_critical": 0,
-                "longest_waiting": None
-            }
-
-        # Calculate response times for assigned incidents
+        incidents: list[IncidentResponse],
+        resources: list[ResourceResponse],
+    ) -> dict[str, Any]:
         response_times = []
-        by_severity = defaultdict(list)
         unassigned_critical = 0
-        waiting_times = []
-
+        waiting = []
         for incident in incidents:
             if incident.assigned_resource:
-                # Find the assigned resource
-                resource = next(
-                    (r for r in resources if r.id == incident.assigned_resource),
-                    None
-                )
-
+                resource = next((item for item in resources if item.id == incident.assigned_resource), None)
                 if resource and resource.eta is not None:
-                    response_time = resource.eta
-                    response_times.append(response_time)
-                    by_severity[incident.severity].append(response_time)
+                    response_times.append(resource.eta)
             else:
-                if incident.severity == "P1":
+                # Count unassigned P1 incidents correctly using consistent severity handling
+                if get_severity_value(incident.severity) == "P1":
                     unassigned_critical += 1
-
-                # Calculate waiting time
-                call_time = datetime.fromisoformat(incident.timestamp)
-                waiting_time = (datetime.now() - call_time).total_seconds() / 60
-                waiting_times.append(waiting_time)
-
-        avg_response = sum(response_times) / len(response_times) if response_times else 0
-        longest_waiting = max(waiting_times) if waiting_times else 0
-
-        # Format response times by severity
-        response_by_severity = {
-            s: round(sum(times)/len(times), 1) if times else 0
-            for s, times in by_severity.items()
-        }
-
+                call_time = datetime.fromisoformat(incident.timestamp.replace("Z", "+00:00")).replace(tzinfo=None)
+                waiting.append((datetime.now() - call_time).total_seconds() / 60)
         return {
-            "average_response_time": round(avg_response, 1),
-            "response_times_by_severity": response_by_severity,
+            "average_response_time": round(sum(response_times) / len(response_times), 1) if response_times else 0,
             "unassigned_critical": unassigned_critical,
-            "longest_waiting": round(longest_waiting, 1) if longest_waiting > 0 else 0,
-            "median_response_time": StatsService._calculate_median(response_times)
+            "longest_waiting": round(max(waiting), 1) if waiting else 0,
         }
 
     @staticmethod
-    def _calculate_trends(historical_data: List[Dict]) -> Dict:
-        """Calculate trends from historical data."""
-        if not historical_data:
-            return {
-                "hourly_trends": {},
-                "daily_trends": {},
-                "busy_hours": []
-            }
-
-        # Group by hour of day
-        hourly = defaultdict(list)
-        daily = defaultdict(list)
-
+    def _calculate_trends(historical_data: list[dict]) -> dict[str, Any]:
+        hourly: dict[str, int] = defaultdict(int)
         for record in historical_data:
             try:
-                dt = datetime.fromisoformat(record["timestamp"])
-                hourly[dt.hour].append(record)
-                daily[dt.date()].append(record)
+                hourly[str(datetime.fromisoformat(record["timestamp"]).hour)] += 1
             except (KeyError, ValueError):
                 continue
-
-        # Calculate hourly averages
-        hourly_trends = {
-            str(h): len(calls)
-            for h, calls in hourly.items()
-        }
-
-        # Calculate daily averages
-        daily_trends = {
-            str(d): len(calls)
-            for d, calls in daily.items()
-        }
-
-        # Find busy hours (top 3)
-        busy_hours = sorted(
-            hourly_trends.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )[:3]
-
+        busy = sorted(hourly.items(), key=lambda item: item[1], reverse=True)[:3]
         return {
-            "hourly_trends": hourly_trends,
-            "daily_trends": daily_trends,
-            "busy_hours": [{"hour": h, "count": c} for h, c in busy_hours],
-            "average_daily_calls": round(sum(len(v) for v in daily.values()) / len(daily), 1)
+            "hourly_trends": dict(hourly),
+            "busy_hours": [{"hour": hour, "count": count} for hour, count in busy],
         }
 
     @staticmethod
-    def _calculate_median(values: List[float]) -> float:
-        """Calculate median of a list of values."""
-        if not values:
-            return 0
-
-        sorted_values = sorted(values)
-        n = len(sorted_values)
-
-        if n % 2 == 1:
-            return sorted_values[n//2]
-        else:
-            return (sorted_values[n//2 - 1] + sorted_values[n//2]) / 2
-
-    @staticmethod
-    def generate_report(
-        current_stats: Dict,
-        historical_stats: Optional[Dict] = None
-    ) -> Dict:
-        """
-        Generate a human-readable report from statistics.
-
-        Args:
-            current_stats: Current statistics
-            historical_stats: Optional historical statistics for comparison
-
-        Returns:
-            Formatted report
-        """
-        report = {
-            "summary": [],
-            "warnings": [],
-            "recommendations": []
-        }
-
-        # System status
-        total_incidents = current_stats.get("total_incidents", 0)
+    def generate_report(current_stats: dict[str, Any], historical_stats: Optional[dict] = None) -> dict[str, Any]:
+        report = {"summary": [], "warnings": [], "recommendations": []}
+        total = current_stats.get("total_incidents", 0)
         critical = current_stats.get("critical_incidents", 0)
         utilization = current_stats.get("utilization_rate", 0)
-
         report["summary"].append(
-            f"System currently tracking {total_incidents} incidents "
-            f"({critical} critical). Resource utilization at {utilization*100:.1f}%."
+            f"Tracking {total} unique incidents ({critical} critical). "
+            f"Resource utilization at {utilization * 100:.0f}%."
         )
-
-        # Warnings
-        if critical > 0:
-            unassigned = current_stats.get("unassigned_critical", 0)
-            if unassigned > 0:
-                report["warnings"].append(
-                    f"⚠️ {unassigned} critical incidents unassigned!"
-                )
-
-        if utilization > 0.8:
+        if current_stats.get("unassigned_critical", 0):
             report["warnings"].append(
-                "⚠️ High resource utilization (>80%). Consider additional units."
+                f"{current_stats['unassigned_critical']} critical incidents still unassigned."
             )
-
-        # Recommendations
-        avg_response = current_stats.get("average_response_time", 0)
-        if avg_response > 10:  # More than 10 minutes
-            report["recommendations"].append(
-                "Consider reallocating resources to reduce response times."
-            )
-
-        if historical_stats:
-            historical_avg = historical_stats.get("average_daily_calls", 0)
-            current_daily = current_stats.get("total_incidents", 0)
-            if current_daily > historical_avg * 1.5:
-                report["recommendations"].append(
-                    "Current call volume is 50% higher than average. "
-                    "Monitor for potential surge."
-                )
-
+        if utilization > 0.8:
+            report["warnings"].append("High resource utilization. Consider mutual aid.")
+        if current_stats.get("average_response_time", 0) > 10:
+            report["recommendations"].append("Reallocate units to cut response times.")
         return report
